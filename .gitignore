@@ -1,0 +1,21 @@
+# Secrets — never commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Agent runtime data (dumps, SQLite DB)
+/var/lib/middleware-agent/
+*.hprof
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
