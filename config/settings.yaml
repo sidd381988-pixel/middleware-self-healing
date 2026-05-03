@@ -1,0 +1,40 @@
+tomcat:
+  catalina_out: /opt/tomcat/logs/catalina.out
+  access_log: /opt/tomcat/logs/localhost_access_log.*.txt
+  service_name: tomcat
+  setenv_sh: /opt/tomcat/bin/setenv.sh
+  webapps_url: http://localhost:8080
+  health_check_path: /
+
+java:
+  home: /usr/lib/jvm/java-11-openjdk
+  # Initial heap; agent will increase this on OOM events
+  initial_heap_mb: 512
+  heap_increment_mb: 500
+
+database:
+  host: db.internal
+  port: 5432
+  # Used for connectivity check via socket (no credentials needed)
+
+agent:
+  poll_interval_seconds: 30
+  state_db: /var/lib/middleware-agent/state.db
+  dumps_dir: /var/lib/middleware-agent/dumps
+
+thresholds:
+  http500_window_seconds: 120
+  http500_min_count: 5
+  oom_max_occurrences_before_notify: 2
+  npe_max_restarts_before_notify: 2
+
+email:
+  smtp_host: smtp.company.com
+  smtp_port: 587
+  smtp_user: middleware-agent@company.com
+  # SMTP_PASSWORD loaded from env
+  from_addr: middleware-agent@company.com
+  admin_addrs:
+    - admin1@company.com
+    - admin2@company.com
+  use_tls: true
