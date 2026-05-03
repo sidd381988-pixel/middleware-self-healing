@@ -30,7 +30,7 @@ fi
 
 # ── 3. Download and extract Tomcat ─────────────────────────────────────────────
 TOMCAT_MAJOR="${TOMCAT_VERSION%%.*}"
-MIRROR_URL="https://downloads.apache.org/tomcat/tomcat-${TOMCAT_MAJOR}/v${TOMCAT_VERSION}/bin/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
+MIRROR_URL="https://downloads.apache.org/tomcat/tomcat-10/v10.1.54/bin/apache-tomcat-10.1.54.tar.gz"
 ARCHIVE_URL="https://archive.apache.org/dist/tomcat/tomcat-${TOMCAT_MAJOR}/v${TOMCAT_VERSION}/bin/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
 TMP_TAR="/tmp/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
 
