@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-TOMCAT_VERSION="10.1.20"
+TOMCAT_VERSION="10.1.40"
 TOMCAT_USER="tomcat"
 TOMCAT_GROUP="tomcat"
 TOMCAT_HOME="/opt/tomcat"
@@ -30,11 +30,15 @@ fi
 
 # ── 3. Download and extract Tomcat ─────────────────────────────────────────────
 TOMCAT_MAJOR="${TOMCAT_VERSION%%.*}"
-DOWNLOAD_URL="https://downloads.apache.org/tomcat/tomcat-${TOMCAT_MAJOR}/v${TOMCAT_VERSION}/bin/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
+MIRROR_URL="https://downloads.apache.org/tomcat/tomcat-${TOMCAT_MAJOR}/v${TOMCAT_VERSION}/bin/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
+ARCHIVE_URL="https://archive.apache.org/dist/tomcat/tomcat-${TOMCAT_MAJOR}/v${TOMCAT_VERSION}/bin/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
 TMP_TAR="/tmp/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
 
 log "Downloading Tomcat $TOMCAT_VERSION ..."
-curl -fsSL "$DOWNLOAD_URL" -o "$TMP_TAR"
+if ! curl -fsSL "$MIRROR_URL" -o "$TMP_TAR" 2>/dev/null; then
+    log "Main mirror returned 404 — falling back to Apache archive ..."
+    curl -fsSL "$ARCHIVE_URL" -o "$TMP_TAR"
+fi
 
 log "Extracting to $TOMCAT_HOME ..."
 mkdir -p "$TOMCAT_HOME"
