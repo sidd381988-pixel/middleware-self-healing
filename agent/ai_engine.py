@@ -1,163 +1,116 @@
 """
-Claude API integration.
+Ollama-based AI engine.
 
-Sends filtered log lines to claude-opus-4-7 with adaptive thinking and
-prompt-cached runbook system prompt.  Returns a structured action decision.
+Sends filtered log lines to a locally-running Ollama model and returns
+a structured action decision as a parsed Python dict.
+
+Ollama is queried with format="json" which forces JSON-only output.
+The system prompt makes the expected schema explicit so smaller models
+(phi3:mini, gemma2:2b, llama3.2:3b) reliably produce parseable responses.
 """
 
 import json
 import logging
 from typing import Any
 
-import anthropic
+import ollama
 
 logger = logging.getLogger(__name__)
 
-# ── Runbook system prompt (static → cached) ───────────────────────────────────
+# ── System / runbook prompt ───────────────────────────────────────────────────
+# Kept deliberately short for small models — less context = faster inference
+# and fewer hallucinations on constrained hardware.
 _RUNBOOK = """
-You are an autonomous middleware self-healing agent monitoring Apache Tomcat on RHEL.
-Your job is to analyze log snippets and decide the correct remediation action.
+You are an autonomous middleware self-healing agent for Apache Tomcat on RHEL.
+Analyse the provided log lines and respond with a JSON object ONLY — no prose, no markdown, no code fences.
 
-## Known incident types and required responses
+## Incident rules
 
-### 1. HTTP 500 errors (continuous)
-- Trigger: ≥5 HTTP 500 responses within 2 minutes
-- Step 1: Execute health_check against the app URL
-- Step 2 (if still failing): Execute thread_dump + heap_dump, then restart
-- Action: "health_check" → if still 500 → "thread_dump,heap_dump,restart"
+1. HTTP 500 errors (>=5 in recent window)
+   action: "health_check"
+   additional_actions: ["thread_dump","heap_dump","restart"]  (only if still failing)
+   urgency: high
 
-### 2. OutOfMemoryError (OOM)
-- Trigger: java.lang.OutOfMemoryError in catalina.out
-- Step 1: Execute thread_dump, then increase_heap (+500 MB)
-- Step 2: If OOM has occurred MORE THAN 2 times total → also notify_admin
-- Action: "thread_dump,increase_heap" (+ "notify_admin" if count > 2)
+2. OutOfMemoryError
+   action: "thread_dump"
+   additional_actions: ["increase_heap"]
+   notify_admin: true if oom_count_total > 2
+   urgency: critical
 
-### 3. Database connectivity issue
-- Trigger: "Connection refused", "Cannot get a connection", "Communications link failure"
-- Step 1: Execute telnet_check against the database host/port
-- Step 2: notify_admin immediately
-- Action: "telnet_check,notify_admin"
+3. DB connectivity failure  ("Connection refused", "Communications link failure", "Cannot get a connection")
+   action: "telnet_check"
+   additional_actions: ["notify_admin"]
+   urgency: critical
 
-### 4. NullPointerException (NPE)
-- Trigger: java.lang.NullPointerException in catalina.out
-- Step 1: restart Tomcat (logs are auto-preserved)
-- Step 2: If NPE persists (occurs again after restart) → notify_admin
-- Action: "restart" (+ "notify_admin" if recurring)
+4. NullPointerException
+   action: "restart"
+   notify_admin: true if npe_count_total > 1
+   urgency: high
 
-### 5. GC issues
-- Trigger: "GC overhead limit exceeded", "FullGC", "GCLocker"
-- Step 1: Analyze heap usage pattern
-- Step 2: notify_admin with tuning recommendations
-- Action: "notify_admin"
+5. GC issues  ("GC overhead limit", "FullGC", "GCLocker")
+   action: "notify_admin"
+   urgency: medium
 
-## Output rules
-Respond ONLY with valid JSON matching the schema below — no prose, no markdown.
-If the logs contain no actionable signal, set action to "watch".
+6. No actionable signal
+   action: "watch"
+   urgency: low
 
-Schema:
+## Required JSON schema (respond with this exact structure)
 {
-  "incident_type": "http500|oom|db_connectivity|npe|gc|none",
-  "action": "watch|health_check|thread_dump|heap_dump|restart|increase_heap|telnet_check|notify_admin",
-  "additional_actions": ["list of secondary actions to execute after the primary"],
-  "reason": "one sentence explaining the decision",
-  "urgency": "low|medium|high|critical",
-  "notify_admin": true|false,
-  "notification_message": "message text if notify_admin is true, else empty string"
+  "incident_type": "<http500|oom|db_connectivity|npe|gc|none>",
+  "action": "<watch|health_check|thread_dump|heap_dump|restart|increase_heap|telnet_check|notify_admin>",
+  "additional_actions": [],
+  "reason": "<one sentence>",
+  "urgency": "<low|medium|high|critical>",
+  "notify_admin": false,
+  "notification_message": ""
 }
 """.strip()
-
-# JSON schema for structured output enforcement
-_ACTION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "incident_type": {
-            "type": "string",
-            "enum": ["http500", "oom", "db_connectivity", "npe", "gc", "none"],
-        },
-        "action": {
-            "type": "string",
-            "enum": [
-                "watch", "health_check", "thread_dump", "heap_dump",
-                "restart", "increase_heap", "telnet_check", "notify_admin",
-            ],
-        },
-        "additional_actions": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "reason": {"type": "string"},
-        "urgency": {
-            "type": "string",
-            "enum": ["low", "medium", "high", "critical"],
-        },
-        "notify_admin": {"type": "boolean"},
-        "notification_message": {"type": "string"},
-    },
-    "required": [
-        "incident_type", "action", "additional_actions",
-        "reason", "urgency", "notify_admin", "notification_message",
-    ],
-}
 
 
 class AIEngine:
     def __init__(self, cfg: dict):
-        self._client = anthropic.Anthropic(api_key=cfg["anthropic_api_key"])
+        ollama_cfg = cfg.get("ollama", {})
+        self._model = ollama_cfg.get("model", "phi3:mini")
+        self._host = ollama_cfg.get("host", "http://localhost:11434")
+        self._timeout = int(ollama_cfg.get("timeout", 120))
+        self._client = ollama.Client(host=self._host)
+        logger.info("AIEngine ready — model=%s host=%s", self._model, self._host)
 
     def analyze(self, log_lines: list[str], state_summary: dict) -> dict[str, Any]:
         """
-        Send filtered log lines to Claude and return a parsed action decision.
-
-        state_summary: dict with incident counts, e.g.
-            {"oom_count": 3, "npe_count": 1, "http500_recent": 7}
+        Send filtered log lines + incident state to Ollama.
+        Returns a parsed action-decision dict.
         """
-        log_text = "\n".join(log_lines[-200:])  # cap at 200 lines
+        log_text = "\n".join(log_lines[-150:])  # cap to keep prompt small
         user_msg = (
-            f"Current incident state:\n{json.dumps(state_summary, indent=2)}\n\n"
-            f"New log lines:\n{log_text}"
+            f"Current incident counts:\n{json.dumps(state_summary, indent=2)}\n\n"
+            f"New Tomcat log lines:\n{log_text}\n\n"
+            "Respond with the JSON decision only."
         )
 
         try:
-            response = self._client.messages.create(
-                model="claude-opus-4-7",
-                max_tokens=1024,
-                thinking={"type": "adaptive"},
-                system=[
-                    {
-                        "type": "text",
-                        "text": _RUNBOOK,
-                        "cache_control": {"type": "ephemeral"},  # prompt caching
-                    }
+            response = self._client.chat(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": _RUNBOOK},
+                    {"role": "user",   "content": user_msg},
                 ],
-                messages=[{"role": "user", "content": user_msg}],
-                output_config={
-                    "format": {
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": "action_decision",
-                            "schema": _ACTION_SCHEMA,
-                            "strict": True,
-                        },
-                    }
+                format="json",          # forces JSON-only output
+                options={
+                    "temperature": 0,   # deterministic decisions
+                    "num_predict": 512, # cap output tokens — decision is small
                 },
             )
-        except anthropic.APIError as e:
-            logger.error("Claude API error: %s", e)
+        except ollama.ResponseError as e:
+            logger.error("Ollama response error: %s", e)
+            return _fallback_watch(str(e))
+        except Exception as e:
+            logger.error("Ollama connection error: %s", e)
             return _fallback_watch(str(e))
 
-        # Extract text block from response
-        text_block = next(
-            (b.text for b in response.content if hasattr(b, "text")), None
-        )
-        if not text_block:
-            logger.warning("No text block in Claude response")
-            return _fallback_watch("empty response")
-
-        try:
-            decision = json.loads(text_block)
-        except json.JSONDecodeError as e:
-            logger.error("Failed to parse Claude JSON: %s\nRaw: %s", e, text_block)
-            return _fallback_watch("json parse error")
+        raw = response.message.content
+        decision = _parse_json(raw)
 
         logger.info(
             "AI decision: %s / %s (urgency=%s)",
@@ -168,12 +121,55 @@ class AIEngine:
         return decision
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _parse_json(raw: str) -> dict:
+    """
+    Parse the model response, tolerating minor formatting issues.
+    Falls back to 'watch' if the response can't be parsed.
+    """
+    text = raw.strip()
+
+    # Strip accidental code fences some models add despite format="json"
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(
+            l for l in lines if not l.strip().startswith("```")
+        ).strip()
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        # Try extracting the first {...} block
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start != -1 and end > start:
+            try:
+                data = json.loads(text[start:end])
+            except json.JSONDecodeError as e:
+                logger.warning("Could not parse Ollama JSON: %s\nRaw: %s", e, raw[:300])
+                return _fallback_watch("json parse error")
+        else:
+            logger.warning("No JSON object in Ollama response. Raw: %s", raw[:300])
+            return _fallback_watch("no json found")
+
+    # Ensure required keys exist
+    data.setdefault("incident_type", "none")
+    data.setdefault("action", "watch")
+    data.setdefault("additional_actions", [])
+    data.setdefault("reason", "")
+    data.setdefault("urgency", "low")
+    data.setdefault("notify_admin", False)
+    data.setdefault("notification_message", "")
+    return data
+
+
 def _fallback_watch(reason: str) -> dict:
     return {
         "incident_type": "none",
         "action": "watch",
         "additional_actions": [],
-        "reason": f"Fallback watch due to: {reason}",
+        "reason": f"Fallback watch — {reason}",
         "urgency": "low",
         "notify_admin": False,
         "notification_message": "",

@@ -17,6 +17,18 @@ database:
   port: 5432
   # Used for connectivity check via socket (no credentials needed)
 
+ollama:
+  # Ollama server — runs locally on the same host
+  host: http://localhost:11434
+  # Recommended models for a 2 vCPU / 7-8 GB RAM server:
+  #   phi3:mini      (3.8B — ~2.3 GB RAM, best balance of speed + quality)
+  #   gemma2:2b      (2B   — ~1.6 GB RAM, fastest)
+  #   llama3.2:3b    (3B   — ~2.0 GB RAM, good reasoning)
+  #   mistral:7b     (7B   — ~4.1 GB RAM, highest quality but slow on CPU)
+  model: phi3:mini
+  # How long to wait for a single inference response (seconds)
+  timeout: 120
+
 agent:
   poll_interval_seconds: 30
   state_db: /var/lib/middleware-agent/state.db

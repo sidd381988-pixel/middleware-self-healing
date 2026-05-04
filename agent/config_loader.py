@@ -21,6 +21,5 @@ def load_config(path: str = None) -> dict:
 
     # Inject secrets from environment
     _cfg.setdefault("email", {})["smtp_password"] = os.environ.get("SMTP_PASSWORD", "")
-    _cfg["anthropic_api_key"] = os.environ.get("ANTHROPIC_API_KEY", "")
 
     return _cfg
