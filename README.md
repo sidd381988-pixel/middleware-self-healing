@@ -2,7 +2,7 @@
 
 An AI-powered autonomous agent that monitors Apache Tomcat logs on RHEL and automatically remediates common production incidents — no human intervention required.
 
-Built with **Claude claude-opus-4-7** (Anthropic) as the decision engine.
+Powered by **Ollama** running a local LLM — no external API keys, no internet dependency, no inference costs.
 
 ---
 
@@ -12,35 +12,35 @@ Built with **Claude claude-opus-4-7** (Anthropic) as the decision engine.
 catalina.out / access log
         │
         ▼
-  ┌─────────────┐     regex pre-filter      ┌───────────────┐
-  │  Log Tailer │ ─── (only signal lines) ──▶│   AI Engine   │
-  └─────────────┘                            │ (Claude API)  │
-                                             └──────┬────────┘
-                                                    │ JSON action decision
-                                                    ▼
-                                         ┌──────────────────────┐
-                                         │   Action Executor    │
-                                         │  jstack / jmap /     │
-                                         │  systemctl restart / │
-                                         │  heap bump / telnet  │
-                                         └──────────┬───────────┘
-                                                    │
-                                         ┌──────────▼───────────┐
-                                         │   State Manager      │
-                                         │   (SQLite)           │
-                                         └──────────┬───────────┘
-                                                    │  notify_admin=true
-                                                    ▼
-                                         ┌──────────────────────┐
-                                         │   Email Notifier     │
-                                         │   (smtplib / TLS)    │
-                                         └──────────────────────┘
+  ┌─────────────┐     regex pre-filter      ┌───────────────────┐
+  │  Log Tailer │ ─── (only signal lines) ──▶│    AI Engine      │
+  └─────────────┘                            │  (Ollama / local) │
+                                             └────────┬──────────┘
+                                                      │ JSON action decision
+                                                      ▼
+                                           ┌──────────────────────┐
+                                           │   Action Executor    │
+                                           │  jstack / jmap /     │
+                                           │  systemctl restart / │
+                                           │  heap bump / telnet  │
+                                           └──────────┬───────────┘
+                                                      │
+                                           ┌──────────▼───────────┐
+                                           │   State Manager      │
+                                           │   (SQLite)           │
+                                           └──────────┬───────────┘
+                                                      │  notify_admin=true
+                                                      ▼
+                                           ┌──────────────────────┐
+                                           │   Email Notifier     │
+                                           │   (smtplib / TLS)    │
+                                           └──────────────────────┘
 ```
 
 Every **30 seconds** the agent:
 1. Reads only newly-written lines from `catalina.out` and the Tomcat access log
 2. Pre-filters with regex to keep only actionable signal lines (errors, exceptions, 5xx, GC, DB)
-3. Sends filtered lines + current incident state to Claude for a structured JSON decision
+3. Sends filtered lines + current incident state to Ollama for a structured JSON decision
 4. Executes the decided actions
 5. Records the incident and action in SQLite
 6. Emails admins when required
@@ -67,7 +67,7 @@ middleware-self-healing/
 │   ├── main.py              # Orchestrator — 30-second polling loop
 │   ├── config_loader.py     # Loads settings.yaml + .env secrets
 │   ├── log_tailer.py        # Tails catalina.out + access log (seek-based)
-│   ├── ai_engine.py         # Claude API — adaptive thinking + prompt caching
+│   ├── ai_engine.py         # Ollama client — local LLM inference
 │   ├── action_executor.py   # jstack, jmap, systemctl, heap bump, socket check
 │   ├── state_manager.py     # SQLite incident history & action tracking
 │   └── notifier.py          # Email via smtplib (TLS)
@@ -84,14 +84,31 @@ middleware-self-healing/
 
 ## Prerequisites
 
-| Requirement | Version |
-|-------------|---------|
+| Requirement | Notes |
+|-------------|-------|
 | OS | RHEL 8 or 9 |
 | Python | 3.11+ |
 | Java | OpenJDK 11+ |
-| Apache Tomcat | 10.x (installed by `install_tomcat.sh`) |
-| Anthropic API key | claude-opus-4-7 access |
+| Apache Tomcat | 10.x — installed by `install_tomcat.sh` |
+| Ollama | Installed on the same server (see below) |
 | SMTP relay | TLS-capable (e.g. SendGrid, company relay) |
+
+> **No API key required.** Everything runs locally on your server.
+
+---
+
+## Choosing a Model
+
+Pick based on your available RAM. The model name goes in `config/settings.yaml → ollama.model`.
+
+| Model | RAM usage | Speed (CPU) | Quality | Recommended for |
+|-------|-----------|-------------|---------|-----------------|
+| `gemma2:2b` | ~1.6 GB | Fastest | Good | Very tight RAM (<4 GB free) |
+| `phi3:mini` | ~2.3 GB | Fast | Very good | ✅ **Default — best balance** |
+| `llama3.2:3b` | ~2.0 GB | Fast | Very good | Alternative to phi3:mini |
+| `mistral:7b` | ~4.1 GB | Slow on CPU | Excellent | If you have 6+ GB free RAM |
+
+For a **2 vCPU / 7.4 GB** server running Tomcat, `phi3:mini` leaves enough RAM for Tomcat (512 MB heap) and the OS.
 
 ---
 
@@ -103,22 +120,30 @@ middleware-self-healing/
 sudo bash scripts/install_tomcat.sh
 ```
 
-This script:
-- Installs `java-11-openjdk-devel` via `dnf`
-- Downloads and extracts Tomcat 10.1 to `/opt/tomcat`
-- Creates a `tomcat` system user
-- Registers a `systemd` service (`systemctl start/stop/restart tomcat`)
-- Opens port `8080` via `firewall-cmd`
-- Applies SELinux context to the port
-- Creates `/var/lib/middleware-agent/dumps/` for thread/heap dumps
+### 2 — Install Ollama
 
-### 2 — Install Python dependencies
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Start the Ollama service
+sudo systemctl enable --now ollama
+```
+
+### 3 — Pull the LLM model
+
+```bash
+ollama pull phi3:mini
+# Verify it works
+ollama run phi3:mini "Say hello"
+```
+
+### 4 — Install Python dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3 — Configure secrets
+### 5 — Configure secrets
 
 ```bash
 cp .env.example .env
@@ -127,15 +152,17 @@ cp .env.example .env
 Edit `.env`:
 
 ```env
-ANTHROPIC_API_KEY=sk-ant-...
 SMTP_PASSWORD=your_smtp_password
 ```
 
-### 4 — Configure the agent
+### 6 — Configure the agent
 
 Edit `config/settings.yaml` — minimum required changes:
 
 ```yaml
+ollama:
+  model: phi3:mini          # ← match the model you pulled
+
 database:
   host: your-db-host.internal   # ← real DB host for connectivity checks
   port: 5432
@@ -147,8 +174,6 @@ email:
     - admin@yourcompany.com
 ```
 
-All other defaults work out of the box for a standard Tomcat install.
-
 ---
 
 ## Running the Agent
@@ -157,21 +182,21 @@ All other defaults work out of the box for a standard Tomcat install.
 # Foreground (recommended for initial testing)
 python agent/main.py
 
-# Background via systemd (production)
-sudo cp scripts/middleware-agent.service /etc/systemd/system/
-sudo systemctl enable --now middleware-agent
+# Background via nohup
+nohup python agent/main.py > /var/log/middleware-agent.log 2>&1 &
 ```
 
 Sample output:
 
 ```
 2024-01-15 10:32:01 INFO     main — Middleware self-healing agent started (poll=30s)
-2024-01-15 10:32:31 INFO     main — Collected 3 signal lines — consulting Claude
-2024-01-15 10:32:33 INFO     ai_engine — AI decision: oom / thread_dump (urgency=high)
-2024-01-15 10:32:33 INFO     main — Executing action: thread_dump (incident=oom)
-2024-01-15 10:32:34 INFO     main —   ✓ thread_dump succeeded: Saved to /var/lib/middleware-agent/dumps/thread_dump_20240115_103234.txt
-2024-01-15 10:32:34 INFO     main — Executing action: increase_heap (incident=oom)
-2024-01-15 10:32:34 INFO     main —   ✓ increase_heap succeeded: Heap increased by 500MB → Xmx=1012m (restart required)
+2024-01-15 10:32:01 INFO     ai_engine — AIEngine ready — model=phi3:mini host=http://localhost:11434
+2024-01-15 10:32:31 INFO     main — Collected 3 signal lines — consulting Ollama
+2024-01-15 10:32:34 INFO     ai_engine — AI decision: oom / thread_dump (urgency=critical)
+2024-01-15 10:32:34 INFO     main — Executing action: thread_dump (incident=oom)
+2024-01-15 10:32:35 INFO     main —   ✓ thread_dump succeeded: Saved to /var/lib/middleware-agent/dumps/thread_dump_20240115_103235.txt
+2024-01-15 10:32:35 INFO     main — Executing action: increase_heap (incident=oom)
+2024-01-15 10:32:35 INFO     main —   ✓ increase_heap succeeded: Heap increased by 500MB → Xmx=1012m (restart required)
 ```
 
 ---
@@ -200,11 +225,11 @@ sudo bash scripts/simulate_errors.sh gc
 Watch the agent respond in real time:
 
 ```bash
-# Agent logs
+# Agent logs (terminal 1)
 python agent/main.py
 
-# In a second terminal
-tail -f /opt/tomcat/logs/catalina.out
+# Inject error (terminal 2)
+sudo bash scripts/simulate_errors.sh oom
 ```
 
 ---
@@ -214,29 +239,34 @@ tail -f /opt/tomcat/logs/catalina.out
 ```yaml
 # config/settings.yaml
 
+ollama:
+  host: http://localhost:11434  # Ollama API address
+  model: phi3:mini              # Model to use for inference
+  timeout: 120                  # Seconds to wait for a response
+
 tomcat:
   catalina_out: /opt/tomcat/logs/catalina.out
   access_log: /opt/tomcat/logs/localhost_access_log.*.txt
-  service_name: tomcat            # systemd service name
+  service_name: tomcat          # systemd service name
   setenv_sh: /opt/tomcat/bin/setenv.sh
   webapps_url: http://localhost:8080
-  health_check_path: /            # path for HTTP 200 check
+  health_check_path: /          # path for HTTP 200 check
 
 java:
-  heap_increment_mb: 500          # bytes added per OOM event
+  heap_increment_mb: 500        # MB added per OOM event
 
 database:
-  host: db.internal               # host for socket connectivity check
+  host: db.internal             # host for socket connectivity check
   port: 5432
 
 agent:
-  poll_interval_seconds: 30       # how often to check logs
+  poll_interval_seconds: 30     # how often to check logs
   state_db: /var/lib/middleware-agent/state.db
   dumps_dir: /var/lib/middleware-agent/dumps
 
 thresholds:
-  http500_window_seconds: 120     # sliding window for 500-count
-  http500_min_count: 5            # 500s in window before acting
+  http500_window_seconds: 120   # sliding window for 500-count
+  http500_min_count: 5
   oom_max_occurrences_before_notify: 2
   npe_max_restarts_before_notify: 2
 
@@ -254,19 +284,21 @@ email:
 
 ## Architecture Notes
 
-### Claude API usage
-- **Model**: `claude-opus-4-7` with `thinking: {type: "adaptive"}`
-- **Prompt caching**: The static runbook system prompt is cached via `cache_control: {"type": "ephemeral"}`, saving ~90% on repeated input token costs each poll cycle
-- **Structured output**: Claude returns a strict JSON schema (`output_config.format`) — no string parsing needed
-- **Fallback**: If the API is unreachable, the agent defaults to `action: "watch"` and logs the error
+### Ollama integration
+- **`format="json"`** — forces the model to emit valid JSON; no markdown or prose
+- **`temperature: 0`** — deterministic decisions; same log lines always produce the same action
+- **`num_predict: 512`** — caps output tokens since the decision payload is small (~100 tokens)
+- **Robust JSON parsing** — strips accidental code fences, extracts first `{...}` block, fills missing keys with safe defaults
+- **Fallback** — if Ollama is unreachable or returns unparseable output, the agent defaults to `action: "watch"` and logs the error
 
 ### State management
-Incident counts survive agent restarts via SQLite. This enables logic like:
-- "OOM has occurred 3 times total → notify admin" (even across restarts)
-- "Restart cooldown: don't restart more than once every 5 minutes"
+Incident counts survive agent restarts via SQLite:
+- "OOM has occurred 3 times total → notify admin"
+- Restart cooldown: no more than one restart every 5 minutes
+- Heap increase cooldown: no more than one increase every 10 minutes
 
 ### Log tailing
-Tracks seek position per file. Detects log rotation via inode change. Only forwards lines matching the signal regex patterns — everything else is discarded before touching the LLM.
+Tracks seek position per file. Detects log rotation via inode change. Only forwards lines matching the signal regex patterns — everything else is discarded before touching the LLM, keeping inference fast.
 
 ---
 
@@ -274,9 +306,11 @@ Tracks seek position per file. Detects log rotation via inode change. Only forwa
 
 | Symptom | Check |
 |---------|-------|
-| Agent sees no lines | Verify `catalina_out` path in `settings.yaml`; check file permissions |
-| `ANTHROPIC_API_KEY` error | Ensure `.env` is in project root and key is valid |
+| `Connection refused` on Ollama | `systemctl status ollama` — make sure service is running |
+| `model not found` error | `ollama pull phi3:mini` — model must be pulled before use |
+| Slow inference (>30s per cycle) | Switch to a smaller model (`gemma2:2b`) or reduce `poll_interval_seconds` |
+| Agent sees no log lines | Verify `catalina_out` path in `settings.yaml`; check file permissions |
 | `thread_dump failed: Tomcat PID not found` | Tomcat must be running: `systemctl status tomcat` |
-| `heap_dump failed` | `jmap` requires the agent to run as the same user as Tomcat (`tomcat`) or root |
-| Email not sent | Check SMTP credentials, port, TLS setting; test with `python -c "import smtplib; ..."` |
+| `heap_dump failed` | `jmap` requires running as the same user as Tomcat (`tomcat`) or root |
+| Email not sent | Check SMTP credentials and TLS setting |
 | `Cannot reach db:5432` | Expected if DB is down — agent will notify admins |
