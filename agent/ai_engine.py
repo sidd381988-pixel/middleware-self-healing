@@ -1,34 +1,34 @@
 """
-Ollama-based AI engine.
+Amazon Bedrock AI engine.
 
-Sends filtered log lines to a locally-running Ollama model and returns
-a structured action decision as a parsed Python dict.
+Invokes Claude Sonnet via the Bedrock Converse API (boto3) and returns a
+structured action decision as a parsed Python dict.
 
-Ollama is queried with format="json" which forces JSON-only output.
-The system prompt makes the expected schema explicit so smaller models
-(phi3:mini, gemma2:2b, llama3.2:3b) reliably produce parseable responses.
+Authentication: boto3 picks up credentials automatically from:
+  1. Environment variables  (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)
+  2. ~/.aws/credentials      (aws configure)
+  3. IAM instance role       (if running on EC2)
 """
 
 import json
 import logging
 from typing import Any
 
-import ollama
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 
 logger = logging.getLogger(__name__)
 
-# ── System / runbook prompt ───────────────────────────────────────────────────
-# Kept deliberately short for small models — less context = faster inference
-# and fewer hallucinations on constrained hardware.
+# ── Runbook system prompt ─────────────────────────────────────────────────────
 _RUNBOOK = """
 You are an autonomous middleware self-healing agent for Apache Tomcat on RHEL.
 Analyse the provided log lines and respond with a JSON object ONLY — no prose, no markdown, no code fences.
 
 ## Incident rules
 
-1. HTTP 500 errors (>=5 in recent window)
+1. HTTP 500 errors  (>=5 in recent window)
    action: "health_check"
-   additional_actions: ["thread_dump","heap_dump","restart"]  (only if still failing)
+   additional_actions: ["thread_dump", "heap_dump", "restart"]
    urgency: high
 
 2. OutOfMemoryError
@@ -55,7 +55,7 @@ Analyse the provided log lines and respond with a JSON object ONLY — no prose,
    action: "watch"
    urgency: low
 
-## Required JSON schema (respond with this exact structure)
+## Required JSON schema — respond with this exact structure, nothing else
 {
   "incident_type": "<http500|oom|db_connectivity|npe|gc|none>",
   "action": "<watch|health_check|thread_dump|heap_dump|restart|increase_heap|telnet_check|notify_admin>",
@@ -70,19 +70,26 @@ Analyse the provided log lines and respond with a JSON object ONLY — no prose,
 
 class AIEngine:
     def __init__(self, cfg: dict):
-        ollama_cfg = cfg.get("ollama", {})
-        self._model = ollama_cfg.get("model", "phi3:mini")
-        self._host = ollama_cfg.get("host", "http://localhost:11434")
-        self._timeout = int(ollama_cfg.get("timeout", 120))
-        self._client = ollama.Client(host=self._host)
-        logger.info("AIEngine ready — model=%s host=%s", self._model, self._host)
+        bedrock_cfg = cfg.get("bedrock", {})
+        self._model_id = bedrock_cfg.get(
+            "model_id",
+            "us.anthropic.claude-sonnet-4-5-20250514-v1:0",
+        )
+        self._max_tokens = int(bedrock_cfg.get("max_tokens", 1024))
+        region = bedrock_cfg.get("region", "us-east-1")
+
+        # boto3 auto-reads AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from env
+        self._client = boto3.client("bedrock-runtime", region_name=region)
+        logger.info(
+            "AIEngine ready — model=%s region=%s", self._model_id, region
+        )
 
     def analyze(self, log_lines: list[str], state_summary: dict) -> dict[str, Any]:
         """
-        Send filtered log lines + incident state to Ollama.
+        Send filtered log lines + incident state to Claude via Bedrock Converse API.
         Returns a parsed action-decision dict.
         """
-        log_text = "\n".join(log_lines[-150:])  # cap to keep prompt small
+        log_text = "\n".join(log_lines[-200:])
         user_msg = (
             f"Current incident counts:\n{json.dumps(state_summary, indent=2)}\n\n"
             f"New Tomcat log lines:\n{log_text}\n\n"
@@ -90,28 +97,39 @@ class AIEngine:
         )
 
         try:
-            response = self._client.chat(
-                model=self._model,
+            response = self._client.converse(
+                modelId=self._model_id,
+                system=[{"text": _RUNBOOK}],
                 messages=[
-                    {"role": "system", "content": _RUNBOOK},
-                    {"role": "user",   "content": user_msg},
+                    {
+                        "role": "user",
+                        "content": [{"text": user_msg}],
+                    }
                 ],
-                format="json",          # forces JSON-only output
-                options={
-                    "temperature": 0,   # deterministic decisions
-                    "num_predict": 512, # cap output tokens — decision is small
+                inferenceConfig={
+                    "maxTokens": self._max_tokens,
+                    "temperature": 0.0,   # deterministic decisions
                 },
             )
-        except ollama.ResponseError as e:
-            logger.error("Ollama response error: %s", e)
+        except ClientError as e:
+            code = e.response["Error"]["Code"]
+            logger.error("Bedrock ClientError [%s]: %s", code, e)
+            return _fallback_watch(f"ClientError: {code}")
+        except BotoCoreError as e:
+            logger.error("Bedrock BotoCoreError: %s", e)
             return _fallback_watch(str(e))
         except Exception as e:
-            logger.error("Ollama connection error: %s", e)
+            logger.error("Unexpected Bedrock error: %s", e)
             return _fallback_watch(str(e))
 
-        raw = response.message.content
-        decision = _parse_json(raw)
+        # Extract text from Converse response
+        try:
+            raw = response["output"]["message"]["content"][0]["text"]
+        except (KeyError, IndexError) as e:
+            logger.error("Unexpected Bedrock response shape: %s | response=%s", e, response)
+            return _fallback_watch("unexpected response shape")
 
+        decision = _parse_json(raw)
         logger.info(
             "AI decision: %s / %s (urgency=%s)",
             decision.get("incident_type"),
@@ -126,11 +144,11 @@ class AIEngine:
 def _parse_json(raw: str) -> dict:
     """
     Parse the model response, tolerating minor formatting issues.
-    Falls back to 'watch' if the response can't be parsed.
+    Falls back to 'watch' if the response cannot be parsed.
     """
     text = raw.strip()
 
-    # Strip accidental code fences some models add despite format="json"
+    # Strip accidental markdown code fences
     if text.startswith("```"):
         lines = text.splitlines()
         text = "\n".join(
@@ -147,13 +165,13 @@ def _parse_json(raw: str) -> dict:
             try:
                 data = json.loads(text[start:end])
             except json.JSONDecodeError as e:
-                logger.warning("Could not parse Ollama JSON: %s\nRaw: %s", e, raw[:300])
+                logger.warning("Could not parse Bedrock JSON: %s\nRaw: %s", e, raw[:300])
                 return _fallback_watch("json parse error")
         else:
-            logger.warning("No JSON object in Ollama response. Raw: %s", raw[:300])
+            logger.warning("No JSON object in Bedrock response. Raw: %s", raw[:300])
             return _fallback_watch("no json found")
 
-    # Ensure required keys exist
+    # Ensure all required keys exist with safe defaults
     data.setdefault("incident_type", "none")
     data.setdefault("action", "watch")
     data.setdefault("additional_actions", [])

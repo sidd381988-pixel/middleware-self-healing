@@ -2,7 +2,7 @@
 
 An AI-powered autonomous agent that monitors Apache Tomcat logs on RHEL and automatically remediates common production incidents — no human intervention required.
 
-Powered by **Ollama** running a local LLM — no external API keys, no internet dependency, no inference costs.
+Powered by **Claude Sonnet on Amazon Bedrock** — serverless LLM inference, no GPU required on your server.
 
 ---
 
@@ -12,35 +12,37 @@ Powered by **Ollama** running a local LLM — no external API keys, no internet 
 catalina.out / access log
         │
         ▼
-  ┌─────────────┐     regex pre-filter      ┌───────────────────┐
-  │  Log Tailer │ ─── (only signal lines) ──▶│    AI Engine      │
-  └─────────────┘                            │  (Ollama / local) │
-                                             └────────┬──────────┘
-                                                      │ JSON action decision
-                                                      ▼
-                                           ┌──────────────────────┐
-                                           │   Action Executor    │
-                                           │  jstack / jmap /     │
-                                           │  systemctl restart / │
-                                           │  heap bump / telnet  │
-                                           └──────────┬───────────┘
-                                                      │
-                                           ┌──────────▼───────────┐
-                                           │   State Manager      │
-                                           │   (SQLite)           │
-                                           └──────────┬───────────┘
-                                                      │  notify_admin=true
-                                                      ▼
-                                           ┌──────────────────────┐
-                                           │   Email Notifier     │
-                                           │   (smtplib / TLS)    │
-                                           └──────────────────────┘
+  ┌─────────────┐     regex pre-filter      ┌────────────────────────┐
+  │  Log Tailer │ ─── (only signal lines) ──▶│       AI Engine        │
+  └─────────────┘                            │  Claude Sonnet via     │
+                                             │  Amazon Bedrock        │
+                                             │  (boto3 Converse API)  │
+                                             └──────────┬─────────────┘
+                                                        │ JSON action decision
+                                                        ▼
+                                             ┌──────────────────────┐
+                                             │   Action Executor    │
+                                             │  jstack / jmap /     │
+                                             │  systemctl restart / │
+                                             │  heap bump / telnet  │
+                                             └──────────┬───────────┘
+                                                        │
+                                             ┌──────────▼───────────┐
+                                             │   State Manager      │
+                                             │   (SQLite)           │
+                                             └──────────┬───────────┘
+                                                        │  notify_admin=true
+                                                        ▼
+                                             ┌──────────────────────┐
+                                             │   Email Notifier     │
+                                             │   (smtplib / TLS)    │
+                                             └──────────────────────┘
 ```
 
 Every **30 seconds** the agent:
 1. Reads only newly-written lines from `catalina.out` and the Tomcat access log
 2. Pre-filters with regex to keep only actionable signal lines (errors, exceptions, 5xx, GC, DB)
-3. Sends filtered lines + current incident state to Ollama for a structured JSON decision
+3. Sends filtered lines + current incident state to Claude Sonnet via Bedrock for a JSON decision
 4. Executes the decided actions
 5. Records the incident and action in SQLite
 6. Emails admins when required
@@ -67,7 +69,7 @@ middleware-self-healing/
 │   ├── main.py              # Orchestrator — 30-second polling loop
 │   ├── config_loader.py     # Loads settings.yaml + .env secrets
 │   ├── log_tailer.py        # Tails catalina.out + access log (seek-based)
-│   ├── ai_engine.py         # Ollama client — local LLM inference
+│   ├── ai_engine.py         # boto3 Bedrock Converse API — Claude Sonnet
 │   ├── action_executor.py   # jstack, jmap, systemctl, heap bump, socket check
 │   ├── state_manager.py     # SQLite incident history & action tracking
 │   └── notifier.py          # Email via smtplib (TLS)
@@ -90,25 +92,41 @@ middleware-self-healing/
 | Python | 3.11+ |
 | Java | OpenJDK 11+ |
 | Apache Tomcat | 10.x — installed by `install_tomcat.sh` |
-| Ollama | Installed on the same server (see below) |
+| AWS account | Bedrock enabled, Claude Sonnet model access requested |
 | SMTP relay | TLS-capable (e.g. SendGrid, company relay) |
 
-> **No API key required.** Everything runs locally on your server.
+> **No GPU or local model needed.** Inference runs entirely on AWS Bedrock.
 
 ---
 
-## Choosing a Model
+## AWS Setup
 
-Pick based on your available RAM. The model name goes in `config/settings.yaml → ollama.model`.
+### 1 — Enable Bedrock model access
 
-| Model | RAM usage | Speed (CPU) | Quality | Recommended for |
-|-------|-----------|-------------|---------|-----------------|
-| `gemma2:2b` | ~1.6 GB | Fastest | Good | Very tight RAM (<4 GB free) |
-| `phi3:mini` | ~2.3 GB | Fast | Very good | ✅ **Default — best balance** |
-| `llama3.2:3b` | ~2.0 GB | Fast | Very good | Alternative to phi3:mini |
-| `mistral:7b` | ~4.1 GB | Slow on CPU | Excellent | If you have 6+ GB free RAM |
+1. Open the [AWS Console → Amazon Bedrock → Model access](https://console.aws.amazon.com/bedrock/home#/modelaccess)
+2. Click **Manage model access**
+3. Enable **Claude Sonnet** (Anthropic)
+4. Wait for status to show **Access granted**
 
-For a **2 vCPU / 7.4 GB** server running Tomcat, `phi3:mini` leaves enough RAM for Tomcat (512 MB heap) and the OS.
+### 2 — Create an IAM user or role
+
+The agent only needs one permission:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "bedrock:InvokeModel",
+      "Resource": "arn:aws:bedrock:*::foundation-model/anthropic.claude-*"
+    }
+  ]
+}
+```
+
+- **EC2 / on-prem with instance role**: attach the policy to the role — no keys needed in `.env`
+- **Local / CI**: create an IAM user, generate access keys, put them in `.env`
 
 ---
 
@@ -120,30 +138,13 @@ For a **2 vCPU / 7.4 GB** server running Tomcat, `phi3:mini` leaves enough RAM f
 sudo bash scripts/install_tomcat.sh
 ```
 
-### 2 — Install Ollama
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Start the Ollama service
-sudo systemctl enable --now ollama
-```
-
-### 3 — Pull the LLM model
-
-```bash
-ollama pull phi3:mini
-# Verify it works
-ollama run phi3:mini "Say hello"
-```
-
-### 4 — Install Python dependencies
+### 2 — Install Python dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 5 — Configure secrets
+### 3 — Configure secrets
 
 ```bash
 cp .env.example .env
@@ -152,20 +153,25 @@ cp .env.example .env
 Edit `.env`:
 
 ```env
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=your_secret_key
+AWS_REGION=us-east-1
 SMTP_PASSWORD=your_smtp_password
 ```
 
-### 6 — Configure the agent
+> If running on EC2 with an IAM instance role, you can omit the AWS keys — boto3 will pick up the role automatically.
+
+### 4 — Configure the agent
 
 Edit `config/settings.yaml` — minimum required changes:
 
 ```yaml
-ollama:
-  model: phi3:mini          # ← match the model you pulled
+bedrock:
+  region: us-east-1            # ← region where you enabled Bedrock
+  model_id: us.anthropic.claude-sonnet-4-5-20250514-v1:0  # ← or your preferred Sonnet ID
 
 database:
-  host: your-db-host.internal   # ← real DB host for connectivity checks
-  port: 5432
+  host: your-db-host.internal  # ← real DB host for connectivity checks
 
 email:
   smtp_host: smtp.yourcompany.com
@@ -173,6 +179,18 @@ email:
   admin_addrs:
     - admin@yourcompany.com
 ```
+
+---
+
+## Available Claude Sonnet Model IDs
+
+| Model | Bedrock Model ID | Notes |
+|-------|-----------------|-------|
+| Claude Sonnet 4.5 | `us.anthropic.claude-sonnet-4-5-20250514-v1:0` | ✅ Latest — recommended |
+| Claude 3.5 Sonnet v2 | `us.anthropic.claude-3-5-sonnet-20241022-v2:0` | Previous generation |
+| Claude 3.5 Sonnet | `anthropic.claude-3-5-sonnet-20240620-v1:0` | Older |
+
+> The `us.` prefix uses **cross-region inference profiles** — Bedrock automatically routes to the least-loaded US region, giving higher throughput and fewer throttle errors. Recommended over single-region IDs.
 
 ---
 
@@ -190,20 +208,18 @@ Sample output:
 
 ```
 2024-01-15 10:32:01 INFO     main — Middleware self-healing agent started (poll=30s)
-2024-01-15 10:32:01 INFO     ai_engine — AIEngine ready — model=phi3:mini host=http://localhost:11434
-2024-01-15 10:32:31 INFO     main — Collected 3 signal lines — consulting Ollama
-2024-01-15 10:32:34 INFO     ai_engine — AI decision: oom / thread_dump (urgency=critical)
-2024-01-15 10:32:34 INFO     main — Executing action: thread_dump (incident=oom)
-2024-01-15 10:32:35 INFO     main —   ✓ thread_dump succeeded: Saved to /var/lib/middleware-agent/dumps/thread_dump_20240115_103235.txt
-2024-01-15 10:32:35 INFO     main — Executing action: increase_heap (incident=oom)
-2024-01-15 10:32:35 INFO     main —   ✓ increase_heap succeeded: Heap increased by 500MB → Xmx=1012m (restart required)
+2024-01-15 10:32:01 INFO     ai_engine — AIEngine ready — model=us.anthropic.claude-sonnet-4-5-20250514-v1:0 region=us-east-1
+2024-01-15 10:32:31 INFO     main — Collected 3 signal lines — consulting Claude via Bedrock
+2024-01-15 10:32:33 INFO     ai_engine — AI decision: oom / thread_dump (urgency=critical)
+2024-01-15 10:32:33 INFO     main — Executing action: thread_dump (incident=oom)
+2024-01-15 10:32:34 INFO     main —   ✓ thread_dump succeeded: Saved to /var/lib/middleware-agent/dumps/thread_dump_20240115_103234.txt
+2024-01-15 10:32:34 INFO     main — Executing action: increase_heap (incident=oom)
+2024-01-15 10:32:34 INFO     main —   ✓ increase_heap succeeded: Heap increased by 500MB → Xmx=1012m (restart required)
 ```
 
 ---
 
 ## Testing Scenarios
-
-Use the simulator to inject log entries without needing a real error:
 
 ```bash
 # Inject OutOfMemoryError
@@ -225,10 +241,10 @@ sudo bash scripts/simulate_errors.sh gc
 Watch the agent respond in real time:
 
 ```bash
-# Agent logs (terminal 1)
+# Terminal 1 — run agent
 python agent/main.py
 
-# Inject error (terminal 2)
+# Terminal 2 — inject error
 sudo bash scripts/simulate_errors.sh oom
 ```
 
@@ -237,35 +253,33 @@ sudo bash scripts/simulate_errors.sh oom
 ## Configuration Reference
 
 ```yaml
-# config/settings.yaml
-
-ollama:
-  host: http://localhost:11434  # Ollama API address
-  model: phi3:mini              # Model to use for inference
-  timeout: 120                  # Seconds to wait for a response
+bedrock:
+  region: us-east-1
+  model_id: us.anthropic.claude-sonnet-4-5-20250514-v1:0
+  max_tokens: 1024              # cap on response length
 
 tomcat:
   catalina_out: /opt/tomcat/logs/catalina.out
   access_log: /opt/tomcat/logs/localhost_access_log.*.txt
-  service_name: tomcat          # systemd service name
+  service_name: tomcat
   setenv_sh: /opt/tomcat/bin/setenv.sh
   webapps_url: http://localhost:8080
-  health_check_path: /          # path for HTTP 200 check
+  health_check_path: /
 
 java:
   heap_increment_mb: 500        # MB added per OOM event
 
 database:
-  host: db.internal             # host for socket connectivity check
+  host: db.internal
   port: 5432
 
 agent:
-  poll_interval_seconds: 30     # how often to check logs
+  poll_interval_seconds: 30
   state_db: /var/lib/middleware-agent/state.db
   dumps_dir: /var/lib/middleware-agent/dumps
 
 thresholds:
-  http500_window_seconds: 120   # sliding window for 500-count
+  http500_window_seconds: 120
   http500_min_count: 5
   oom_max_occurrences_before_notify: 2
   npe_max_restarts_before_notify: 2
@@ -284,12 +298,12 @@ email:
 
 ## Architecture Notes
 
-### Ollama integration
-- **`format="json"`** — forces the model to emit valid JSON; no markdown or prose
+### Bedrock integration
+- **Converse API** (`boto3 bedrock-runtime.converse`) — standardized API that works across all Bedrock models; cleaner than the raw `invoke_model` endpoint
 - **`temperature: 0`** — deterministic decisions; same log lines always produce the same action
-- **`num_predict: 512`** — caps output tokens since the decision payload is small (~100 tokens)
 - **Robust JSON parsing** — strips accidental code fences, extracts first `{...}` block, fills missing keys with safe defaults
-- **Fallback** — if Ollama is unreachable or returns unparseable output, the agent defaults to `action: "watch"` and logs the error
+- **Error handling** — distinguishes `ClientError` (auth, throttle, model not enabled) from `BotoCoreError` (network); both fall back to `action: "watch"` safely
+- **Cross-region inference** (`us.*` prefix) — higher availability, automatic load balancing across AWS US regions
 
 ### State management
 Incident counts survive agent restarts via SQLite:
@@ -298,7 +312,7 @@ Incident counts survive agent restarts via SQLite:
 - Heap increase cooldown: no more than one increase every 10 minutes
 
 ### Log tailing
-Tracks seek position per file. Detects log rotation via inode change. Only forwards lines matching the signal regex patterns — everything else is discarded before touching the LLM, keeping inference fast.
+Tracks seek position per file. Detects log rotation via inode change. Only forwards lines matching the signal regex patterns before touching the LLM, keeping inference cost low.
 
 ---
 
@@ -306,11 +320,11 @@ Tracks seek position per file. Detects log rotation via inode change. Only forwa
 
 | Symptom | Check |
 |---------|-------|
-| `Connection refused` on Ollama | `systemctl status ollama` — make sure service is running |
-| `model not found` error | `ollama pull phi3:mini` — model must be pulled before use |
-| Slow inference (>30s per cycle) | Switch to a smaller model (`gemma2:2b`) or reduce `poll_interval_seconds` |
+| `AccessDeniedException` | IAM policy missing `bedrock:InvokeModel` — see AWS Setup above |
+| `ResourceNotFoundException` | Model ID wrong or model access not granted in Bedrock console |
+| `ThrottlingException` | Reduce `poll_interval_seconds` or switch to cross-region `us.*` model ID |
+| `NoCredentialsError` | Check `.env` has `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, or attach IAM role |
 | Agent sees no log lines | Verify `catalina_out` path in `settings.yaml`; check file permissions |
 | `thread_dump failed: Tomcat PID not found` | Tomcat must be running: `systemctl status tomcat` |
-| `heap_dump failed` | `jmap` requires running as the same user as Tomcat (`tomcat`) or root |
+| `heap_dump failed` | `jmap` requires running as the same user as Tomcat or root |
 | Email not sent | Check SMTP credentials and TLS setting |
-| `Cannot reach db:5432` | Expected if DB is down — agent will notify admins |
