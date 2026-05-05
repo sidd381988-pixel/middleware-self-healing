@@ -28,7 +28,7 @@ bedrock:
   # Options:
   #   us.anthropic.claude-sonnet-4-5-20250514-v1:0   (Claude Sonnet 4.5 — latest)
   #   us.anthropic.claude-3-5-sonnet-20241022-v2:0   (Claude 3.5 Sonnet v2)
-  model_id: amazon.nova-2-lite-v1:0
+  model_id: anthropic.claude-sonnet-4-20250514-v1:0
 
   # Tokens to generate for the action decision (decision JSON is ~100 tokens)
   max_tokens: 1024
