@@ -73,7 +73,7 @@ class AIEngine:
         bedrock_cfg = cfg.get("bedrock", {})
         self._model_id = bedrock_cfg.get(
             "model_id",
-            "us.anthropic.claude-sonnet-4-5-20250514-v1:0",
+            "anthropic.claude-3-5-sonnet-20241022-v2:0",
         )
         self._max_tokens = int(bedrock_cfg.get("max_tokens", 1024))
         region = bedrock_cfg.get("region", "us-east-1")

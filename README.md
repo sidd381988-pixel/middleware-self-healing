@@ -186,11 +186,12 @@ email:
 
 | Model | Bedrock Model ID | Notes |
 |-------|-----------------|-------|
-| Claude Sonnet 4.5 | `us.anthropic.claude-sonnet-4-5-20250514-v1:0` | ✅ Latest — recommended |
-| Claude 3.5 Sonnet v2 | `us.anthropic.claude-3-5-sonnet-20241022-v2:0` | Previous generation |
-| Claude 3.5 Sonnet | `anthropic.claude-3-5-sonnet-20240620-v1:0` | Older |
+| Claude 3.5 Sonnet v2 | `anthropic.claude-3-5-sonnet-20241022-v2:0` | ✅ Recommended |
+| Claude 3.5 Sonnet v1 | `anthropic.claude-3-5-sonnet-20240620-v1:0` | Older |
+| Claude 3 Sonnet | `anthropic.claude-3-sonnet-20240229-v1:0` | Basic |
+| Claude 3.5 Sonnet v2 (cross-region) | `us.anthropic.claude-3-5-sonnet-20241022-v2:0` | Higher availability |
 
-> The `us.` prefix uses **cross-region inference profiles** — Bedrock automatically routes to the least-loaded US region, giving higher throughput and fewer throttle errors. Recommended over single-region IDs.
+> **Note:** Bedrock model IDs differ from Anthropic API model IDs. Check the [Bedrock console](https://console.aws.amazon.com/bedrock/home#/models) under **Foundation models** to see exactly which models are enabled for your account and region.
 
 ---
 
