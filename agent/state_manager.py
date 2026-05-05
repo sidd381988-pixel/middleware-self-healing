@@ -9,6 +9,7 @@ import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
+from typing import Optional
 
 _lock = threading.Lock()
 _conn: sqlite3.Connection = None
@@ -92,7 +93,7 @@ def record_action(incident_type: str, action: str, result: str = None):
         _conn.commit()
 
 
-def last_action_time(incident_type: str, action: str) -> str | None:
+def last_action_time(incident_type: str, action: str) -> Optional[str]:
     """Return ISO timestamp of the most recent time action was taken for incident_type."""
     _require_conn()
     with _lock:
@@ -104,7 +105,7 @@ def last_action_time(incident_type: str, action: str) -> str | None:
         return row["taken_at"] if row else None
 
 
-def seconds_since_last_action(incident_type: str, action: str) -> float | None:
+def seconds_since_last_action(incident_type: str, action: str) -> Optional[float]:
     """Returns elapsed seconds since the last action, or None if never taken."""
     ts = last_action_time(incident_type, action)
     if ts is None:

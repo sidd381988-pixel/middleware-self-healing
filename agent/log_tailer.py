@@ -8,6 +8,7 @@ across each 30-second poll cycle, and survives log rotation.
 import glob
 import os
 import re
+from typing import Dict, List
 import time
 from dataclasses import dataclass, field
 from typing import List
@@ -52,7 +53,7 @@ class LogTailer:
     def __init__(self, cfg: dict):
         self._catalina = cfg["tomcat"]["catalina_out"]
         self._access_glob = cfg["tomcat"]["access_log"]
-        self._states: dict[str, _FileState] = {}
+        self._states: Dict[str, _FileState] = {}
 
     # ── public API ────────────────────────────────────────────────────────────
 

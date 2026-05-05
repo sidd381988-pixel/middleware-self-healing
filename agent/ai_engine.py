@@ -12,7 +12,7 @@ Authentication: boto3 picks up credentials automatically from:
 
 import json
 import logging
-from typing import Any
+from typing import Any, Dict, List
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -84,7 +84,7 @@ class AIEngine:
             "AIEngine ready — model=%s region=%s", self._model_id, region
         )
 
-    def analyze(self, log_lines: list[str], state_summary: dict) -> dict[str, Any]:
+    def analyze(self, log_lines: List[str], state_summary: dict) -> Dict[str, Any]:
         """
         Send filtered log lines + incident state to Claude via Bedrock Converse API.
         Returns a parsed action-decision dict.

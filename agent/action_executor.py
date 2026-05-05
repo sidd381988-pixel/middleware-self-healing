@@ -8,6 +8,7 @@ Each public method returns a dict with keys:
 
 import logging
 import os
+from typing import Optional
 import re
 import socket
 import subprocess
@@ -132,7 +133,7 @@ class ActionExecutor:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _tomcat_pid(self) -> str | None:
+    def _tomcat_pid(self) -> Optional[str]:
         result = _run(
             ["pgrep", "-f", "org.apache.catalina.startup.Bootstrap"],
             capture=True,
