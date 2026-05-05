@@ -13,9 +13,10 @@ java:
   heap_increment_mb: 500
 
 database:
-  host: db.internal
+  host: localhost
   port: 5432
   # Used for connectivity check via socket (no credentials needed)
+  # Sample DB installed by scripts/install_sample_db.sh
 
 bedrock:
   # AWS region where Bedrock is enabled for your account
